@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-minimax-h3-prompt-formatter"
+description = "Structured MiniMax H3 full-reference prompt editor for ComfyUI"
+version = "1.0.0"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+
+[project.urls]
+Repository = "https://github.com/comfy-org/comfyui"
+
+[tool.comfy]
+PublisherId = "local"
+DisplayName = "MiniMax H3 Prompt Formatter"
+Icon = ""

@@ -144,7 +144,7 @@ def _normalize_shot(shot: dict[str, Any]) -> dict[str, Any]:
         return {
             "references": [],
             "subject_ids": [],
-            "events": [{"sec": 0, "ms": 0, "text": ""}],
+            "events": [{"sec": 0, "ms": 0, "text": "", "enabled": True}],
         }
     events = shot.get("events")
     if not isinstance(events, list) or not events:
@@ -165,10 +165,17 @@ def _normalize_shot(shot: dict[str, Any]) -> dict[str, Any]:
         sec = max(0, min(15, sec))
         ms = max(0, min(900, (ms // 100) * 100))
         normalized_events.append(
-            {"sec": sec, "ms": ms, "text": ev.get("text") or ""}
+            {
+                "sec": sec,
+                "ms": ms,
+                "text": ev.get("text") or "",
+                "enabled": ev.get("enabled", True) is not False,
+            }
         )
     if not normalized_events:
-        normalized_events = [{"sec": 0, "ms": 0, "text": ""}]
+        normalized_events = [
+            {"sec": 0, "ms": 0, "text": "", "enabled": True}
+        ]
     subject_ids = []
     for s in shot.get("subject_ids") or []:
         try:
@@ -577,7 +584,11 @@ def _shot_first_frame_picture_id(shot: dict[str, Any]) -> int | None:
 def _format_shot_block(index: int, shot: dict[str, Any]) -> str:
     shot = _normalize_shot(shot)
     picture_id = _shot_first_frame_picture_id(shot)
-    events = shot.get("events") or []
+    events = [
+        ev for ev in (shot.get("events") or []) if ev.get("enabled", True)
+    ]
+    if not events:
+        return ""
     lines: list[str] = []
     for ei, ev in enumerate(events):
         text = (ev.get("text") or "").strip()
@@ -696,7 +707,9 @@ def build_prompt(
 
     shot_lines = []
     for i, shot in enumerate(state.get("shots") or [], start=1):
-        shot_lines.append(_format_shot_block(i, shot))
+        block = _format_shot_block(i, shot)
+        if block:
+            shot_lines.append(block)
 
     style_opening = as_sentence((state.get("style_opening") or "").strip())
     detailed_parts: list[str] = []

@@ -184,12 +184,12 @@ function normalizeShot(shot) {
     return {
       references: [],
       subject_ids: [],
-      events: [{ sec: 0, ms: 0, text: "" }],
+      events: [{ sec: 0, ms: 0, text: "", enabled: true }],
     };
   }
   let events = Array.isArray(shot.events) ? shot.events : null;
   if (!events || !events.length) {
-    events = [{ sec: 0, ms: 0, text: shot.text || "" }];
+    events = [{ sec: 0, ms: 0, text: shot.text || "", enabled: true }];
   }
   events = events.map((ev) => {
     let sec = parseInt(ev?.sec ?? 0, 10);
@@ -198,7 +198,12 @@ function normalizeShot(shot) {
     if (!Number.isFinite(ms)) ms = 0;
     sec = Math.max(0, Math.min(15, sec));
     ms = Math.max(0, Math.min(900, Math.floor(ms / 100) * 100));
-    return { sec, ms, text: ev?.text || "" };
+    return {
+      sec,
+      ms,
+      text: ev?.text || "",
+      enabled: ev?.enabled !== false,
+    };
   });
   const subject_ids = [
     ...new Set(
@@ -251,9 +256,12 @@ function parseState(raw) {
 }
 
 function injectStyles() {
-  if (document.getElementById("mmh3-prompt-formatter-styles")) return;
-  const style = document.createElement("style");
-  style.id = "mmh3-prompt-formatter-styles";
+  let style = document.getElementById("mmh3-prompt-formatter-styles");
+  if (!style) {
+    style = document.createElement("style");
+    style.id = "mmh3-prompt-formatter-styles";
+    document.head.appendChild(style);
+  }
   style.textContent = `
 .mmh3-root {
   font-family: Inter, system-ui, sans-serif;
@@ -537,11 +545,61 @@ function injectStyles() {
   margin-top: 8px;
 }
 .mmh3-entry:first-of-type { border-top: none; padding-top: 0; }
+.mmh3-shot-box {
+  border: 1px solid #4a5568;
+  border-radius: 6px;
+  padding: 10px;
+  margin-top: 10px;
+  background: rgba(255,255,255,0.03);
+  box-shadow: inset 0 0 0 1px rgba(0,0,0,0.25);
+}
+.mmh3-shot-box:first-of-type { margin-top: 8px; }
+.mmh3-event-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+  margin-top: 6px;
+}
+.mmh3-event-row.disabled {
+  opacity: 0.45;
+}
+.mmh3-event-row.drag-over {
+  outline: 1px dashed #6af;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+.mmh3-event-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  padding-top: 4px;
+  flex-shrink: 0;
+}
+.mmh3-event-controls .mmh3-drag-handle {
+  width: 22px;
+  height: 22px;
+  padding: 0 !important;
+  line-height: 1;
+  font-size: 14px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.mmh3-event-controls .mmh3-drag-handle:active { cursor: grabbing; }
+.mmh3-event-controls input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+}
 .mmh3-event {
+  flex: 1;
+  min-width: 0;
   border: 1px solid #333;
   border-radius: 4px;
   padding: 6px;
-  margin-top: 6px;
   background: rgba(255,255,255,0.02);
 }
 .mmh3-time-row {
@@ -612,7 +670,6 @@ function injectStyles() {
   color: #fff;
 }
 `;
-  document.head.appendChild(style);
 }
 
 const STATE_PROP = "mmh3_prompt_state";
@@ -1133,7 +1190,22 @@ function connectedMedia(node) {
   return { pictures, videos, audios };
 }
 
-/** Signature includes upstream modes so mute/bypass forces a UI refresh. */
+/** Upstream image identity for thumbnail refresh (widget value and/or preview URL). */
+function linkedMediaPreviewKey(node, input) {
+  const { node: src, inactive } = resolveSourceChain(input);
+  if (!src || inactive) return "off";
+  const imageWidget = src.widgets?.find(
+    (w) => w.name === "image" || w.name === "upload"
+  );
+  const widgetVal = imageWidget?.value != null ? String(imageWidget.value) : "";
+  // imgs[0] updates when Load Image swaps files; include src so thumbs refresh
+  // even if the widget string is briefly unchanged.
+  const imgSrc = src.imgs?.[0]?.src || src.imgs?.[0]?.currentSrc || "";
+  const resolved = resolveLinkedImageUrl(node, input) || "";
+  return `${widgetVal}|${imgSrc}|${resolved}`;
+}
+
+/** Signature includes upstream modes + media preview so image swaps refresh thumbs. */
 function graphLinksSignature(node) {
   const kinds = ["image", "video", "video_audio", "audio"];
   return kinds
@@ -1141,7 +1213,8 @@ function graphLinksSignature(node) {
     .map((inp) => {
       if (inp.link == null) return `${inp.name}:open`;
       const { node: src, inactive } = resolveSourceChain(inp);
-      return `${inp.name}:${inp.link}:${src?.id ?? "?"}:${getNodeMode(src)}:${inactive ? "off" : "on"}`;
+      const preview = linkedMediaPreviewKey(node, inp);
+      return `${inp.name}:${inp.link}:${src?.id ?? "?"}:${getNodeMode(src)}:${inactive ? "off" : "on"}:${preview}`;
     })
     .join("|");
 }
@@ -1605,6 +1678,15 @@ function nextSelectableTime(sec, ms) {
   return { sec: maxSec, ms: MS_OPTIONS[MS_OPTIONS.length - 1] };
 }
 
+/** Prefer +1s for a new shot start; fall back to +100ms near the timeline end. */
+function nextShotStartTime(sec, ms) {
+  const s = Number(sec) || 0;
+  const m = Number(ms) || 0;
+  const maxSec = SEC_OPTIONS[SEC_OPTIONS.length - 1];
+  if (s < maxSec) return { sec: s + 1, ms: m };
+  return nextSelectableTime(s, m);
+}
+
 /** Prior event in timeline order (previous event in shot, else last of previous shot). */
 function previousTimelineEvent(shots, shotIdx, eventIdx) {
   const shot = shots?.[shotIdx];
@@ -1732,34 +1814,37 @@ function buildClientPreview(state, pictures, videos = [], audios = []) {
       return detail ? `${head} - ${asSentence(detail)}` : `${head}.`;
     });
 
-  const shotBlocks = (state.shots || []).map((shot, i) => {
-    const n = i + 1;
-    const s = normalizeShot(shot);
-    return s.events
-      .map((ev, ei) => {
-        const text = (ev.text || "").trim();
-        const parts = [];
-        if (ei === 0) {
-          const firstPic = shotFirstFramePictureId(s);
-          if (firstPic) {
-            const mention = `<Picture ${firstPic}>`;
-            if (!text.includes(mention)) {
-              parts.push(`the shot begins from ${mention}.`);
+  const shotBlocks = (state.shots || [])
+    .map((shot, i) => {
+      const n = i + 1;
+      const s = normalizeShot(shot);
+      const events = (s.events || []).filter((ev) => ev.enabled !== false);
+      if (!events.length) return "";
+      return events
+        .map((ev, ei) => {
+          const text = (ev.text || "").trim();
+          const parts = [];
+          if (ei === 0) {
+            const firstPic = shotFirstFramePictureId(s);
+            if (firstPic) {
+              const mention = `<Picture ${firstPic}>`;
+              if (!text.includes(mention)) {
+                parts.push(`the shot begins from ${mention}.`);
+              }
             }
           }
-        }
-        if (text) parts.push(text);
-        let body = parts.join(" ").trim() || "...";
-        if (body !== "...") body = asSentence(body);
-        if (ei === 0) {
-          if (n === 1) return `[Shot ${n}] ${body}`;
-          return `[Shot ${n}] At ${formatTs(ev.sec, ev.ms)}, ${body}`;
-        }
-        // Extra events stay under the same shot — do not repeat [Shot N].
-        return `At ${formatTs(ev.sec, ev.ms)}, ${body}`;
-      })
-      .join("\n");
-  });
+          if (text) parts.push(text);
+          let body = parts.join(" ").trim() || "...";
+          if (body !== "...") body = asSentence(body);
+          if (ei === 0) {
+            if (n === 1) return `[Shot ${n}] ${body}`;
+            return `[Shot ${n}] At ${formatTs(ev.sec, ev.ms)}, ${body}`;
+          }
+          return `At ${formatTs(ev.sec, ev.ms)}, ${body}`;
+        })
+        .join("\n");
+    })
+    .filter(Boolean);
 
   const styleOpening = asSentence((state.style_opening || "").trim());
   const detailedParts = [];
@@ -2604,7 +2689,7 @@ function createFormatterUI(node, stateWidget) {
     state.shots.forEach((shot, idx) => {
       Object.assign(shot, normalizeShot(shot));
       delete shot.picture_id;
-      const entry = el("div", { className: "mmh3-entry" });
+      const entry = el("div", { className: "mmh3-shot-box" });
       const head = el("div", { className: "mmh3-row" });
       const firstPicId = shotFirstFramePictureId(shot);
       const headerPic =
@@ -2655,9 +2740,72 @@ function createFormatterUI(node, stateWidget) {
       grow.appendChild(el("div", { className: "mmh3-label", text: "Events" }));
 
       let timelineDirty = false;
+      let dragFrom = null;
       shot.events.forEach((ev, ei) => {
         const minT = minTimeForEvent(state.shots, idx, ei);
         if (clampEventToMin(ev, minT)) timelineDirty = true;
+
+        const row = el("div", {
+          className:
+            "mmh3-event-row" + (ev.enabled === false ? " disabled" : ""),
+        });
+        row.dataset.eventIndex = String(ei);
+
+        const controls = el("div", { className: "mmh3-event-controls" });
+        const dragBtn = el("button", {
+          className: "mmh3-drag-handle",
+          type: "button",
+          text: "⠿",
+          title: "Drag to reorder",
+          draggable: "true",
+        });
+        dragBtn.addEventListener("dragstart", (e) => {
+          dragFrom = ei;
+          row.classList.add("dragging");
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", String(ei));
+        });
+        dragBtn.addEventListener("dragend", () => {
+          dragFrom = null;
+          row.classList.remove("dragging");
+          grow
+            .querySelectorAll(".mmh3-event-row.drag-over")
+            .forEach((n) => n.classList.remove("drag-over"));
+        });
+        controls.appendChild(dragBtn);
+        controls.appendChild(
+          el("input", {
+            type: "checkbox",
+            checked: ev.enabled !== false,
+            title: "Include this event in the prompt",
+            onChange: (e) => {
+              ev.enabled = !!e.target.checked;
+              persist();
+              renderShots();
+            },
+          })
+        );
+        row.appendChild(controls);
+
+        row.addEventListener("dragover", (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          row.classList.add("drag-over");
+        });
+        row.addEventListener("dragleave", () => {
+          row.classList.remove("drag-over");
+        });
+        row.addEventListener("drop", (e) => {
+          e.preventDefault();
+          row.classList.remove("drag-over");
+          const from = dragFrom ?? parseInt(e.dataTransfer.getData("text/plain"), 10);
+          const to = ei;
+          if (!Number.isFinite(from) || from === to) return;
+          const [moved] = shot.events.splice(from, 1);
+          shot.events.splice(to, 0, moved);
+          persist();
+          renderShots();
+        });
 
         const box = el("div", { className: "mmh3-event" });
         const timeRow = el("div", { className: "mmh3-time-row" });
@@ -2675,7 +2823,9 @@ function createFormatterUI(node, stateWidget) {
           const secOpts = allowedSeconds(minT);
           const msOptsFor = (sec) => {
             const opts = allowedMillis(sec, minT);
-            return opts.length ? opts : allowedMillis(secOpts[0] ?? minT?.sec ?? 0, minT);
+            return opts.length
+              ? opts
+              : allowedMillis(secOpts[0] ?? minT?.sec ?? 0, minT);
           };
 
           const secSel = el("select", { className: "mmh3-time" });
@@ -2720,7 +2870,6 @@ function createFormatterUI(node, stateWidget) {
           secSel.addEventListener("change", () => {
             ev.sec = parseInt(secSel.value, 10);
             refillMs(ev.sec);
-            // Later events may need to bump forward — re-render.
             persist();
             renderShots();
           });
@@ -2738,9 +2887,7 @@ function createFormatterUI(node, stateWidget) {
             timeRow.appendChild(
               el("span", {
                 className: "mmh3-muted",
-                text: prev
-                  ? `(after ${formatTs(prev.sec, prev.ms)})`
-                  : "",
+                text: prev ? `(after ${formatTs(prev.sec, prev.ms)})` : "",
               })
             );
           }
@@ -2773,7 +2920,8 @@ function createFormatterUI(node, stateWidget) {
           );
         }
         box.appendChild(tools);
-        grow.appendChild(box);
+        row.appendChild(box);
+        grow.appendChild(row);
       });
       if (timelineDirty) persist();
 
@@ -2787,7 +2935,12 @@ function createFormatterUI(node, stateWidget) {
               const t = last
                 ? nextSelectableTime(last.sec, last.ms)
                 : minTimeForEvent(state.shots, idx, 0) || { sec: 0, ms: 0 };
-              shot.events.push({ sec: t.sec, ms: t.ms, text: "" });
+              shot.events.push({
+                sec: t.sec,
+                ms: t.ms,
+                text: "",
+                enabled: true,
+              });
               persist();
               renderShots();
             },
@@ -2820,12 +2973,12 @@ function createFormatterUI(node, stateWidget) {
             const prevShot = state.shots[state.shots.length - 1];
             const lastEv = prevShot?.events?.[prevShot.events.length - 1];
             const t = lastEv
-              ? nextSelectableTime(lastEv.sec, lastEv.ms)
+              ? nextShotStartTime(lastEv.sec, lastEv.ms)
               : { sec: 0, ms: 0 };
             state.shots.push({
               references: [],
               subject_ids: [],
-              events: [{ sec: t.sec, ms: t.ms, text: "" }],
+              events: [{ sec: t.sec, ms: t.ms, text: "", enabled: true }],
             });
             persist();
             renderShots();
